@@ -49,8 +49,9 @@ export function base64DecodeTolerantPadding(input: string): Uint8Array {
     return bytes;
   }
 
-  if (typeof Buffer !== 'undefined') {
-    return Uint8Array.from(Buffer.from(padded, 'base64'));
+  const maybeBuffer = (globalThis as unknown as { Buffer?: { from: (data: string, encoding: string) => Uint8Array } }).Buffer;
+  if (maybeBuffer) {
+    return Uint8Array.from(maybeBuffer.from(padded, 'base64'));
   }
 
   throw new PayloadError('Base64 non supporté dans cet environnement.', 'parse');
@@ -65,8 +66,9 @@ export function base64Encode(bytes: Uint8Array): string {
     return btoa(binary);
   }
 
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(bytes).toString('base64');
+  const maybeBuffer = (globalThis as unknown as { Buffer?: { from: (data: Uint8Array) => { toString: (enc: string) => string } } }).Buffer;
+  if (maybeBuffer) {
+    return maybeBuffer.from(bytes).toString('base64');
   }
 
   throw new PayloadError('Base64 non supporté dans cet environnement.', 'parse');
@@ -208,10 +210,11 @@ export async function deriveKeyArgon2id(secret: string, params: Argon2Params): P
 
     // hash-wasm returns Uint8Array in binary mode
     if (hash instanceof Uint8Array) {
-      return hash;
+      // Copy into a plain Uint8Array to ensure ArrayBuffer backing for WebCrypto
+      return Uint8Array.from(hash as ArrayLike<number>);
     }
 
-    return new Uint8Array(hash as ArrayBufferLike);
+    return new Uint8Array(hash as ArrayBuffer);
   } catch (err) {
     throw new PayloadError(`Échec Argon2id: ${(err as Error).message}`, 'kdf');
   } finally {
@@ -220,21 +223,27 @@ export async function deriveKeyArgon2id(secret: string, params: Argon2Params): P
 }
 
 export async function decryptAesGcm(keyBytes: Uint8Array, payload: ParsedPayload): Promise<Uint8Array> {
+  // Copy into fresh ArrayBuffer-backed views to satisfy BufferSource typing (ArrayBuffer, not SharedArrayBuffer).
+  const ivCopy = Uint8Array.from(payload.iv);
+  const ctxtCopy = Uint8Array.from(payload.ciphertext);
+  const keyCopy = Uint8Array.from(keyBytes);
+
   try {
-    const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+    const cryptoKey = await crypto.subtle.importKey('raw', keyCopy, 'AES-GCM', false, ['decrypt']);
     const decrypted = await crypto.subtle.decrypt(
       {
         name: 'AES-GCM',
-        iv: payload.iv,
+        iv: ivCopy,
         tagLength: payload.tagBits,
       },
       cryptoKey,
-      payload.ciphertext,
+      ctxtCopy,
     );
     return new Uint8Array(decrypted);
   } catch (err) {
     throw new PayloadError(`Échec du déchiffrement AES-GCM: ${(err as Error).message}`, 'decrypt');
   } finally {
+    keyCopy.fill(0);
     keyBytes.fill(0);
   }
 }
